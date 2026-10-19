@@ -1,0 +1,260 @@
+---
+name: new-project
+description: Use when creating a new translation project from template and preparing repository metadata.
+user-invocable: true
+---
+
+# Create New Project from Template
+
+## Overview
+
+Create a new game documentation project from template, configure repository metadata, and prepare source PDF for initialization.
+
+**Core principle:** Ask once, create deterministic project state, verify immediately, then hand off.
+
+## Task Initialization (MANDATORY)
+
+Before ANY action, create tasks using TaskCreate:
+- One task per major step (preconditions, user inputs, repo creation, PDF + config, verification)
+
+## The Process
+
+### Step 1: Validate Preconditions
+
+Confirm:
+- `gh` is installed and authenticated
+- `git` is configured
+- source PDF path exists
+
+If any check fails, stop and report exact remediation.
+
+**Verification:** `gh auth status` exits 0; `git config user.name` non-empty; PDF exists.
+
+### Step 2: Ask User Inputs in Traditional Chinese
+
+Collect via AskUserQuestion:
+
+1. Project path
+- header: `專案路徑`
+- question: `請問新專案要建立在哪個路徑？`
+
+2. Game zh-TW title
+- header: `遊戲名稱`
+- question: `請問這款遊戲的繁體中文名稱是什麼？`
+
+3. Project slug (if missing from arguments)
+- header: `專案代號`
+- question: `請問資料夾與 GitHub repo 要使用哪個名稱？`
+
+4. Repository visibility
+- header: `儲存庫類型`
+- question: `GitHub 儲存庫要設為公開還是私有？`
+
+5. Deployment
+- header: `部署方式`
+- question: `網站要怎麼部署？`
+- options, with the recommended one first: `GitHub Pages` (recommended for public repos), `Vercel` (recommended for private repos; optional `SITE_PASSWORD` gate), `匯出到 host 網站` (the book is served under `/books/<project_name>/` of a host site that pulls the `book-export` release)
+
+**Verification:** All five inputs collected and confirmed by user.
+
+### Step 3: Resolve Variables
+
+```bash
+TEMPLATE_ROOT="<current_workspace_root>"
+CLONE_SCRIPT="$TEMPLATE_ROOT/gh-clone.sh"
+TARGET_DIR="<user_path>/<project_name>"
+PDF_PATH="<pdf_path>"
+GAME_TITLE_EN="<derived_from_pdf_filename>"
+GAME_TITLE_ZH="<user_input>"
+REPO_VISIBILITY="<private_or_public>"
+DEPLOY_TARGET="<github-pages_or_vercel_or_blog>"
+REPO_URL="https://github.com/<username>/<project_name>"
+```
+
+**Verification:** All variables resolved to concrete values; no placeholders remain.
+
+### Step 4: Create Repository
+
+Preferred path:
+
+```bash
+cd <user_path>
+if [ "$REPO_VISIBILITY" = "public" ]; then
+  "$CLONE_SCRIPT" <project_name> --public
+else
+  "$CLONE_SCRIPT" <project_name>
+fi
+```
+
+Fallback local-copy path:
+
+```bash
+cp -r "$TEMPLATE_ROOT" <TARGET_DIR>
+cd <TARGET_DIR>
+rm -rf .git
+git init
+gh repo create <project_name> --$REPO_VISIBILITY --source=. --remote=origin
+git add .
+git commit -m "Initial commit from game-doc-template"
+git push -u origin main
+```
+
+**Verification:** `git remote -v` shows origin; `gh repo view` accessible.
+
+### 清理模板範例資料（必要，不可跳過）
+
+複製完成後立即在新專案目錄執行：
+
+```bash
+uv run python scripts/clean_sample_data.py --yes
+```
+
+此步驟會重置 `glossary.json`、`chapters.json`、`style-decisions.json`、`docs/astro.config.mjs`（標題與側欄）、刪除 `data/translation-progress*.json` 與 `plans/`，並寫入佔位首頁，確保新專案不含模板殘留。
+
+### Step 5: Copy PDF and Apply Configuration
+
+Copy PDF:
+
+```bash
+mkdir -p data/pdfs
+cp "<pdf_path>" data/pdfs/
+```
+
+Update:
+- (if public) GitHub social link in `docs/astro.config.mjs`; the site title comes from `site.title`, which `generate_nav.py` writes into `SITE_CONFIG.title`
+- initialize and update `style-decisions.json` via scripts
+- `CLAUDE.md` project description
+
+Use:
+
+```bash
+uv run python scripts/style_decisions.py init
+uv run python scripts/style_decisions.py set-repository \
+  --slug "<project_name>" \
+  --visibility "<private_or_public>" \
+  --url "<REPO_URL>" \
+  --show-on-homepage <true_or_false>
+uv run python scripts/style_decisions.py set-site --title "$GAME_TITLE_ZH" --original-title "$GAME_TITLE_EN"
+uv run python scripts/validate_style_decisions.py
+```
+
+Record the deployment target so `generate_nav.py` and `fix-ref` generate correctly base-prefixed internal links:
+
+- `github-pages`: see README.md's "GitHub Pages（Public 專案推薦）" section for the full recipe (workflow file, `gh api ... pages` enablement, etc.).
+
+  ```bash
+  uv run python scripts/style_decisions.py set-deployment \
+    --target github-pages \
+    --base-path "/<project_name>"
+  ```
+
+- `vercel`: do not set `deployment` — leave it unset so `generate_nav.py` defaults to root-relative links. The Vercel deploy and its `SITE_PASSWORD` gate use the template's `middleware.ts`, `api/site-auth.ts`, and `vercel.json` as they are.
+
+- `blog` (export to a host site): see README.md「匯出到 host 網站（可選）」.
+
+  ```bash
+  uv run python scripts/style_decisions.py set-deployment \
+    --target blog \
+    --base-path "/books/<project_name>"
+  ```
+
+  To have `Book Export` notify the host site after each export, ask the user for the host repo (`<owner>/<repo>`) and record it:
+
+  ```bash
+  gh variable set BOOK_HOST_REPO --repo "<username>/<project_name>" --body "<owner>/<repo>"
+  ```
+
+  The notification also needs a fine-grained token with Contents read/write on the host repo, which the user creates on GitHub. Ask the user to run `! gh secret set BLOG_DISPATCH_TOKEN --repo "<username>/<project_name>"`, which prompts them for the value so the token never enters the conversation.
+
+  Skip both when the user has no host repo to notify; the export still publishes the `book-export` release.
+
+**Verification:** PDF exists in `data/pdfs/`; config files updated; `site.original_title` is set; `style-decisions.json.deployment` is `{"target": "github-pages", "base_path": "/<project_name>"}` for GitHub Pages, absent for Vercel, and `{"target": "blog", "base_path": "/books/<project_name>"}` for the host-site export; when notification was configured, `gh variable list` shows `BOOK_HOST_REPO` and `gh secret list` shows `BLOG_DISPATCH_TOKEN`.
+
+### Step 6: Verify and Report
+
+Verify:
+
+```bash
+ls -la
+ls -la data/pdfs/
+ls -la docs/
+git remote -v
+```
+
+Report in Traditional Chinese:
+
+```text
+✓ 專案已建立：<project_name>
+✓ 遊戲名稱：<GAME_TITLE_EN>（<GAME_TITLE_ZH>）
+✓ 專案路徑：<TARGET_DIR>
+✓ Repo 類型：<REPO_VISIBILITY>
+✓ 部署方式：<DEPLOY_TARGET>
+✓ GitHub repo：https://github.com/<username>/<project_name>
+✓ PDF 已複製到：data/pdfs/<filename>
+
+下一步：
+1. cd <TARGET_DIR>
+2. 執行 /init-doc
+```
+
+Append a deployment note to the report pointing at the README.md〈部署〉subsection for `DEPLOY_TARGET`: "GitHub Pages（Public 專案推薦）", "Vercel（需要密碼保護或私有部署時使用）", or「匯出到 host 網站（可選）」.
+
+**Verification:** All prior verifications pass; report displayed to user.
+
+## Flowchart
+
+```dot
+digraph new_project {
+    rankdir=TB;
+    preconditions [label="Step 1:\nValidate\npreconditions", shape=box];
+    inputs [label="Step 2:\nCollect user\ninputs", shape=box];
+    variables [label="Step 3:\nResolve\nvariables", shape=box];
+    repo [label="Step 4:\nCreate\nrepository", shape=box];
+    pdf_config [label="Step 5:\nCopy PDF &\napply config", shape=box];
+    verify [label="Step 6:\nVerify &\nreport", shape=box];
+
+    preconditions -> inputs;
+    inputs -> variables;
+    variables -> repo;
+    repo -> pdf_config;
+    pdf_config -> verify;
+}
+```
+
+## Progress Sync Contract (Required)
+
+1. Update tasks via TaskCreate/TaskUpdate after each major step.
+2. Mark blockers immediately with reason.
+3. Do not claim completion with open critical items.
+
+## When to Stop and Ask for Help
+
+Stop when:
+- repo name is unavailable and no approved fallback exists
+- auth or permission errors block creation
+- source PDF path remains invalid
+
+## When to Revisit Earlier Steps
+
+Return to input/variable steps when:
+- user changes path/name/visibility
+- source PDF changes
+
+## Red Flags
+
+| Thought | Reality |
+|---------|---------|
+| "Create repo without confirming user decisions" | All required inputs must be collected and confirmed first. |
+| "Expose private repo URL in public homepage links" | Private repo URLs must never appear in public-facing config. |
+| "Skip verification before reporting success" | Every step has a verification gate. Never skip. |
+
+## Next Step
+
+Continue with `/init-doc`.
+
+## Example Usage
+
+```text
+/new-project ~/Downloads/Blades-in-the-Dark.pdf
+/new-project ~/Downloads/game.pdf my-game-docs
+```

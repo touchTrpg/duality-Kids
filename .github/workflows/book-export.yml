@@ -1,0 +1,89 @@
+name: Book Export
+
+# Builds the blog export on every push to main and publishes it as the asset
+# book-export.tar.gz of one rolling release. When the BOOK_HOST_REPO repository
+# variable names the host site repo, it then sends that repo a `book-export`
+# repository_dispatch so the host pulls the new release.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: book-export
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: book-export
+  SHARP_IGNORE_GLOBAL_LIBVIPS: '1'
+
+jobs:
+  target:
+    runs-on: ubuntu-latest
+    outputs:
+      blog: ${{ steps.target.outputs.blog }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Only blog-deployed books export; the template and standalone deploys skip.
+      - name: Read deployment target
+        id: target
+        run: echo "blog=$(jq -r '.deployment.target == "blog"' style-decisions.json)" >> "$GITHUB_OUTPUT"
+
+  export:
+    needs: target
+    if: needs.target.outputs.blog == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install site dependencies
+        working-directory: docs
+        run: bun install --frozen-lockfile
+
+      - name: Build export archive
+        run: python3 scripts/export_site.py --out "$RUNNER_TEMP/book" --archive "$RUNNER_TEMP/book-export.tar.gz"
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Rolling blog export of main at ${GITHUB_SHA}; the asset is replaced on every push."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/book-export.tar.gz" --clobber
+            gh release edit "$RELEASE_TAG" --notes "$notes"
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/book-export.tar.gz" \
+              --target "$GITHUB_SHA" --title "Book export" --notes "$notes"
+          fi
+
+      # BOOK_HOST_REPO (variable): owner/repo of the host site; unset skips this step.
+      # BLOG_DISPATCH_TOKEN (secret): fine-grained token with Contents read/write on it.
+      - name: Notify the host site
+        env:
+          BOOK_HOST_REPO: ${{ vars.BOOK_HOST_REPO }}
+          GH_TOKEN: ${{ secrets.BLOG_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$BOOK_HOST_REPO" ]; then
+            echo "BOOK_HOST_REPO is not set; skipping the host site notification."
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error title=Host site not notified::BOOK_HOST_REPO is $BOOK_HOST_REPO but the BLOG_DISPATCH_TOKEN secret is not set."
+            exit 1
+          fi
+          gh api "repos/$BOOK_HOST_REPO/dispatches" -f event_type=book-export -f "client_payload[repo]=$GITHUB_REPOSITORY"

@@ -1,0 +1,60 @@
+# Unified Translate Flow — Requirements
+
+## Outcome and actors
+
+The project owner wants one primary `/translate` workflow that combines the whole-book context and semantic quality advantages of `super-translate` without its fixed multi-agent review loop. A translation operator should be able to start or resume a rulebook translation and let it continue automatically until a genuine ambiguity or execution failure requires attention.
+
+## In scope
+
+- Make `/translate` the primary focused-file and whole-book translation workflow.
+- Read the complete ordered source corpus once, create a reusable whole-book summary, and summarize every chapter before translation begins.
+- Decide unambiguous terminology before chapter translation and ask the user only about terms or source passages whose ambiguity affects meaning, mechanics, names, wordplay, or tone.
+- Translate each chapter in full using the whole-book context, chapter context, glossary, and style decisions.
+- Replace the fixed Markdown-review agent with deterministic structure validation.
+- Keep one semantic review per chapter; use targeted repair and a second semantic review only when the first review finds unresolved semantic problems.
+- Write each passing chapter back immediately, update progress, maintain translated headings/navigation data, and continue automatically.
+- Run terminology consistency and content completeness checks after translation finishes.
+- After the whole book passes those checks, regenerate final navigation, build the documentation site, verify its search index, and leave a deployable `docs/dist/` artifact.
+- Deprecate `super-translate` gradually through a compatibility wrapper instead of removing the command immediately.
+- After `init-doc` passes its final gate, automatically enter the full translation skill selected by `translation_mode.mode` instead of stopping at a manual handoff.
+- Translate independent chapters in bounded waves of at most three lower-cost draft workers, while keeping shared state mutation and ordered writeback under the orchestrator.
+
+## Out of scope
+
+- Translating a specific rulebook as part of this change.
+- Changing the selected translation models or Codex tier defaults unless required to carry the new context.
+- Redesigning PDF extraction or semantic chapter splitting.
+- Automatically invoking `final-proofread`; it remains a separate release-readiness workflow.
+- Removing the `super-translate` command in this change.
+
+## Concrete scenarios
+
+1. **New whole-book translation:** `/translate all` reads every source chapter in `chapters.json` order, creates reusable translation context, resolves terminology, then translates every pending chapter without batch confirmation prompts.
+2. **Focused translation:** `/translate <file>` reuses a valid whole-book context and translates only the requested file. If context is absent or stale, it prepares or refreshes that context first.
+3. **Resume:** an interrupted run processes `in_progress` chapters before `not_started` chapters and does not ask the user to re-confirm the known scope.
+4. **Unambiguous terminology:** direct, high-confidence mappings are recorded through the existing glossary workflow without a user interruption.
+5. **Ambiguous terminology or source:** the affected chapter pauses; questions are grouped when possible, and only unresolved items are shown to the user.
+6. **Passing chapter:** deterministic structure validation and one semantic review pass; the chapter is written back, progress is updated, navigation is synchronized when its labels changed, and the next chapter starts.
+7. **Failing chapter:** repair only the reported blocks, rerun deterministic checks, and request a second semantic review only when semantic findings remain relevant.
+8. **Completed translation:** run glossary consistency and content completeness once. Report `final-proofread` as the separate next step for publication.
+9. **Legacy invocation:** `/super-translate` reports its deprecation once and delegates to the unified `/translate` behavior without running the old reviewer/refiner pipeline.
+10. **Completed website:** only when every progress entry is `completed`, regenerate navigation, run deterministic project guards, build the site, verify search, and fail closed if any command fails.
+11. **Automatic initialization handoff:** `full` mode enters `/translate all`; `bilingual` mode enters `/bilingual-translate all`. A failed init gate never starts translation.
+12. **Parallel draft wave:** prepare at most three isolated draft paths sequentially, dispatch lower-cost draft workers concurrently, collect all results, and then validate/review/write back each chapter without concurrent mutation of glossary, context, progress, source, navigation, or the draft manifest.
+
+## Confirmed decisions
+
+- `/translate` absorbs the useful whole-book and semantic-review behavior from `super-translate`.
+- `super-translate` enters a compatibility/deprecation period rather than being removed immediately.
+- A normal passing chapter receives one semantic review.
+- Markdown/block-shape validation becomes deterministic.
+- Targeted repair replaces whole-chapter refiner passes.
+- The workflow asks the user only when ambiguity or an unrecoverable failure affects correctness.
+- Translation completion automatically runs consistency and completeness checks, but not `final-proofread`.
+- A whole-book run is not complete until the final navigation and website build pass. Focused or partial translation does not trigger this handoff.
+- Default draft concurrency is three. The orchestrator may reduce it after resource or rate-limit failures but may not exceed it without an explicit future decision.
+- A chapter-local ambiguity blocks only that chapter; an ambiguity that can change shared terminology blocks every dependent chapter and is asked once at the wave boundary.
+
+## Open questions
+
+None.
